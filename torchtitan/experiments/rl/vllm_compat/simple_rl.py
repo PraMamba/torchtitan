@@ -25,20 +25,20 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoConfig, AutoTokenizer
 
-from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-
-from torchtitan.experiments.deterministic_vllm_rl.weights.converter import (
+from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
 )
-from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
+from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from transformers import AutoConfig, AutoTokenizer
+
+from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
 init_batch_invariance()
 
@@ -340,7 +340,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
 
     if use_vllm_compat:
         # Create and load model (using vLLM-compat for bitwise determinism)
-        from torchtitan.experiments.deterministic_vllm_rl.models.qwen3 import (
+        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.models.qwen3 import (
             Qwen3VLLMCompatModel,
         )
 
@@ -481,7 +481,6 @@ def load_gsm8k_dataset(split: str = "train", num_samples: int = 100):
 
 def trivial_reward_function(
     completions: list[str],
-    tokenizer=None,
     expected_answers: list[str] | None = None,
     group_size: int = 4,
 ) -> torch.Tensor:
@@ -494,7 +493,6 @@ def trivial_reward_function(
 
     Args:
         completions: List of completion strings
-        tokenizer: Tokenizer to count tokens
         expected_answers: List of expected answers (one per prompt, repeated for group_size)
         group_size: Number of samples per prompt
 
@@ -891,12 +889,7 @@ def rl_update_step(
         )
 
         # Compute rewards using provided reward function
-        if reward_fn == trivial_reward_function:
-            rewards = reward_fn(completions, tokenizer, expected_answers, group_size)
-        elif reward_fn == math_reward_function:
-            rewards = reward_fn(completions, expected_answers, group_size)
-        else:
-            rewards = reward_fn(completions, expected_answers, group_size)
+        rewards = reward_fn(completions, expected_answers, group_size)
 
         # Normalize rewards for stability (mean=0, std=1)
         reward_mean = rewards.mean()
@@ -1058,7 +1051,7 @@ def main():
         print("✓ Batch invariance detected - using vLLM-compatible model")
         # Add backward pass support to vLLM's batch_invariant mode
         print("  Adding gradient support to vLLM's batch_invariant mode...")
-        from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
         )
 

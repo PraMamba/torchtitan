@@ -38,7 +38,6 @@ def parallelize_vlm(
     the model must fit on GPU or CPU memory.
     """
     assert isinstance(model.encoder, nn.Module)
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -58,13 +57,11 @@ def parallelize_vlm(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    use_flex_attn = attn_type == "flex"
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, job_config.activation_checkpoint)
@@ -76,14 +73,13 @@ def parallelize_vlm(
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(names),
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -102,11 +98,12 @@ def parallelize_vlm(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if dp_mesh is not None and dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,
-            world_mesh,
+            dp_mesh,
             enable_compile=job_config.compile.enable,
         )
 

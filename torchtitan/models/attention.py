@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import functools
 from collections.abc import Callable
 from typing import ClassVar, NamedTuple
 
@@ -21,6 +20,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 from torch.nn.attention.varlen import varlen_attn
+from torch.types import Number
 
 
 __all__ = [
@@ -44,8 +44,8 @@ class VarlenMetadata(NamedTuple):
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: int
-    max_k: int
+    max_q: Number
+    max_k: Number
 
 
 class VarlenAttentionWrapper(torch.nn.Module):
@@ -60,6 +60,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv: torch.Tensor,
         head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
+        scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -67,8 +68,11 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_k = attention_masks.max_k
 
         n_local_heads = xq.shape[1]
+        # pyrefly: ignore [no-matching-overload]
         xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
@@ -80,6 +84,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             max_q,
             max_k,
             is_causal=True,
+            scale=scale,
         )
 
 
@@ -97,7 +102,14 @@ class FlexAttentionWrapper(torch.nn.Module):
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
+        flex_attention,
+        # This options also encapsulate max-autotune-no-cudagraphs.
+        options={
+            "wrap_inductor_compiled_regions": True,
+            "max_autotune": True,
+            "coordinate_descent_tuning": True,
+            "triton.cudagraphs": False,
+        },
     )
 
     def forward(
@@ -140,7 +152,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     """
 
     # TODO: remove sdpa_backends after PyTorch 2.9 is released.
-    sdpa_backends: ClassVar[list[SDPBackend]] = []
+    sdpa_backends: list[SDPBackend] = []
 
     def __init__(self) -> None:
         super().__init__()
@@ -164,22 +176,19 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
             return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 
-# We cannot do inner function/closure because we won't be able to cache it --
-# if we an inner function, a new closure will be created every time
-# `get_causal_mask_mod` is called.
-def _causal_mask(
-    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-) -> torch.Tensor:
-    """Causal mask that prevents attention to future tokens."""
-    return q_idx >= kv_idx
-
-
 def get_causal_mask_mod() -> _mask_mod_signature:
     """Returns a causal mask modifier for flex attention.
 
     Returns:
         A mask modifier function that implements causal masking.
     """
+
+    def _causal_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Causal mask that prevents attention to future tokens."""
+        return q_idx >= kv_idx
+
     return _causal_mask
 
 
@@ -268,13 +277,8 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
-@functools.lru_cache(4)
 def create_attention_mask(*args, **kwargs):
-    """Create an attention mask using compiled create_block_mask.
-
-    This function is cached to avoid recreating BlockMasks for the same
-    arguments.
-    """
+    """Create an attention mask using compiled create_block_mask."""
     return _compiled_create_block_mask(*args, **kwargs)
 
 
